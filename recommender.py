@@ -3,7 +3,7 @@ import numpy as np
 import pickle
 import os
 from sklearn.model_selection import train_test_split
-from sklearn.neighbors import NearestNeighbors
+from annoy import AnnoyIndex
 from scipy.sparse import csr_matrix
 from collections import defaultdict
 from exceptions import BookNotFoundError, InvalidParameterError, BookRecommenderError
@@ -17,37 +17,46 @@ class BookRecommender:
         self.train_books = None
         self.test_books = None
         self.feature_matrix = None
+        self.n_features = None
         
     def save_checkpoint(self):
         """Save the trained model, feature matrices and book splits to checkpoint file."""
         checkpoint = {
-            'model': self.model,
             'train_books': self.train_books,
             'test_books': self.test_books,
-            'feature_matrix': self.feature_matrix
+            'feature_matrix': self.feature_matrix,
+            'n_features': self.n_features
         }
         
         os.makedirs('checkpoints', exist_ok=True)
-        with open('checkpoints/recommender_model.pkl', 'wb') as f:
+        with open('checkpoints/recommender_data.pkl', 'wb') as f:
             pickle.dump(checkpoint, f)
+            
+        if self.model is not None:
+            self.model.save('checkpoints/annoy_index.ann')
             
     def load_checkpoint(self):
         """Load trained model and feature matrices from checkpoint file if it exists."""
         try:
-            with open('checkpoints/recommender_model.pkl', 'rb') as f:
+            with open('checkpoints/recommender_data.pkl', 'rb') as f:
                 checkpoint = pickle.load(f)
                 
-            self.model = checkpoint['model']
             self.train_books = checkpoint['train_books']
             self.test_books = checkpoint['test_books']
             self.feature_matrix = checkpoint['feature_matrix']
-            print("Loaded trained model and features from checkpoint")
-            return True
+            self.n_features = checkpoint['n_features']
+            
+            if os.path.exists('checkpoints/annoy_index.ann'):
+                self.model = AnnoyIndex(self.n_features, 'angular')
+                self.model.load('checkpoints/annoy_index.ann')
+                print("Loaded trained model and features from checkpoint")
+                return True
+            return False
         except (FileNotFoundError, EOFError, KeyError):
             return False
         
     def train(self):
-        """Train the recommendation model with checkpointing."""
+        """Train the recommendation model with checkpointing using Approximate Nearest Neighbors."""
         if self.load_checkpoint():
             return
             
@@ -64,12 +73,14 @@ class BookRecommender:
         self.train_books = self.data_processor.books_cleaned.iloc[train_indices]
         self.test_books = self.data_processor.books_cleaned.iloc[test_indices]
         
-        self.model = NearestNeighbors(
-            algorithm='auto',
-            metric='cosine',
-            n_neighbors=cfg.N_NEIGHBORS
-        )
-        self.model.fit(train_matrix)
+        train_matrix_dense = train_matrix.toarray()
+        self.n_features = train_matrix_dense.shape[1]
+        
+        self.model = AnnoyIndex(self.n_features, 'angular')
+        for i in range(len(train_matrix_dense)):
+            self.model.add_item(i, train_matrix_dense[i])
+            
+        self.model.build(50)
         
         self.save_checkpoint()
         print("Saved trained model and features to checkpoint")
@@ -88,12 +99,7 @@ class BookRecommender:
             max_books_per_author (int): Maximum books per author in recommendations
             
         Returns:
-            pandas.DataFrame: Recommended books
-            
-        Raises:
-            InvalidParameterError: If input parameters are invalid
-            BookNotFoundError: If the input book cannot be found
-            BookRecommenderError: For other recommendation-related errors
+            pandas.DataFrame: Recommended books with rank numbers
         """
         num_recommendations = num_recommendations or cfg.DEFAULT_NUM_RECOMMENDATIONS
         max_books_per_author = max_books_per_author or cfg.DEFAULT_MAX_BOOKS_PER_AUTHOR
@@ -110,7 +116,7 @@ class BookRecommender:
         try:
             book_match = self.book_finder.find_book_name(input_title, input_author)
             if not book_match:
-                return pd.DataFrame(columns=['title', 'author', 'genres', 'rating', 'pages', 'weighted_rating'])
+                return pd.DataFrame(columns=['rank', 'title', 'author', 'genres', 'rating', 'pages', 'weighted_rating'])
             
             matched_title, matched_author = book_match
             input_book = self.data_processor.books_cleaned[
@@ -122,15 +128,17 @@ class BookRecommender:
                 raise BookNotFoundError(f"Book '{matched_title}' by {matched_author} not found in database")
                 
             input_book = input_book.iloc[0]
-            input_vector = csr_matrix(
-                self.data_processor.encode_book_vectorized(pd.DataFrame([input_book]))
+            input_vector = self.data_processor.encode_book_vectorized(pd.DataFrame([input_book])).flatten()
+            
+            n_neighbors = min(num_recommendations * 10, len(self.train_books))
+            indices, distances = self.model.get_nns_by_vector(
+                input_vector, 
+                n_neighbors,
+                include_distances=True
             )
             
-            n_neighbors = min(num_recommendations * 5, len(self.train_books))
-            distances, indices = self.model.kneighbors(input_vector, n_neighbors=n_neighbors)
-            
-            recommendations = self.train_books.iloc[indices[0]].copy()
-            recommendations['distance'] = distances[0]
+            recommendations = self.train_books.iloc[indices].copy()
+            recommendations['similarity'] = 1 - np.array(distances)
             
             recommendations = recommendations[
                 ~((recommendations['title'] == matched_title) & 
@@ -143,7 +151,19 @@ class BookRecommender:
                 recommendations = recommendations[recommendations['language'] == language]
             
             if len(recommendations) == 0:
-                return pd.DataFrame(columns=['title', 'author', 'genres', 'rating', 'pages', 'weighted_rating'])
+                return pd.DataFrame(columns=['rank', 'title', 'author', 'genres', 'rating', 'pages', 'weighted_rating'])
+            
+            max_weighted_rating = recommendations['weighted_rating'].max()
+            min_weighted_rating = recommendations['weighted_rating'].min()
+            recommendations['weighted_rating_norm'] = (recommendations['weighted_rating'] - min_weighted_rating) / (max_weighted_rating - min_weighted_rating)
+            
+            recommendations['ranking_score'] = (
+                recommendations['weighted_rating_norm'] * 0.4 +
+                recommendations['similarity'] * 0.4 +
+                (recommendations['rating'] / 5.0) * 0.2
+            )
+            
+            recommendations = recommendations.sort_values('ranking_score', ascending=False)
             
             author_counts = defaultdict(int)
             diverse_recommendations = []
@@ -157,7 +177,8 @@ class BookRecommender:
                         'rating': book['rating'],
                         'pages': book['pages'],
                         'weighted_rating': book['weighted_rating'],
-                        'distance': book['distance']
+                        'similarity': book['similarity'],
+                        'ranking_score': book['ranking_score']
                     })
                     author_counts[book['author']] += 1
                     
@@ -165,16 +186,14 @@ class BookRecommender:
                     break
             
             if not diverse_recommendations:
-                return pd.DataFrame(columns=['title', 'author', 'genres', 'rating', 'pages', 'weighted_rating'])
+                return pd.DataFrame(columns=['rank', 'title', 'author', 'genres', 'rating', 'pages', 'weighted_rating'])
             
             recommendations = pd.DataFrame(diverse_recommendations)
-            recommendations['final_score'] = (
-                recommendations['weighted_rating'] * cfg.WEIGHTED_RATING_SCORE + 
-                (1 - recommendations['distance']) * cfg.DISTANCE_SCORE
-            )
-            recommendations = recommendations.sort_values('final_score', ascending=False)
+            final_recommendations = recommendations[['title', 'author', 'genres', 'rating', 'pages', 'weighted_rating']].head(num_recommendations)
             
-            return recommendations[['title', 'author', 'genres', 'rating', 'pages', 'weighted_rating']].head(num_recommendations)
+            # Add rank numbers starting from 1
+            final_recommendations.insert(0, 'rank', range(1, len(final_recommendations) + 1))
+            return final_recommendations
             
         except BookRecommenderError:
             raise
@@ -266,7 +285,7 @@ class BookRecommender:
             language (str, optional): Language filter
             
         Returns:
-            pandas.DataFrame: Recommended books
+            pandas.DataFrame: Recommended books with rank numbers
         """
         try:
             recommendations = self.recommend_books(
@@ -278,8 +297,18 @@ class BookRecommender:
             
             if recommendations.empty:
                 print("No recommendations found with the given criteria.")
+            else:
+                print("\nTop Recommendations:")
+                for _, book in recommendations.iterrows():
+                    print(f"\n{book['rank']}. Title: {book['title']}")
+                    print(f"   Author: {book['author']}")
+                    print(f"   Genres: {', '.join(book['genres'])}")
+                    print(f"   User Rating: {book['rating']:.2f}/5.0")
+                    print(f"   Weighted Rating: {book['weighted_rating']:.2f}")
+                    print(f"   Pages: {book['pages']}")
+                    print("   " + "-" * 50)
             return recommendations
             
         except BookRecommenderError as e:
             print(f"Error: {str(e)}")
-            return pd.DataFrame(columns=['title', 'author', 'genres', 'rating', 'pages', 'weighted_rating']) 
+            return pd.DataFrame(columns=['rank', 'title', 'author', 'genres', 'rating', 'pages', 'weighted_rating']) 
