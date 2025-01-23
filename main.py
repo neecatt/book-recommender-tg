@@ -19,27 +19,10 @@ def main():
     recommender.train()
     print(f"Model training time: {time.time() - start_time:.2f} seconds")
     
-    print("\nExample recommendations:")
-    recommendations = recommender.get_recommendations(
-        title="A brief history of time",
+    recommender.get_recommendations(
+        title="Harry Potter and the Philosopher's Stone",
         max_pages=400,
     )
-    
-    if not recommendations.empty:
-        print("\nRecommended books:")
-        for _, book in recommendations.iterrows():
-            print(f"\nTitle: {book['title']}")
-            print(f"Author: {book['author']}")
-            print(f"Genres: {', '.join(book['genres'])}")
-            print(f"Rating: {book['rating']:.2f}")
-            print(f"Pages: {book['pages']}")
-    
-    # # Evaluate model
-    # print("\nEvaluating model...")
-    # metrics = recommender.evaluate(num_samples=100, max_pages=400)
-    # print("\nEvaluation metrics:")
-    # for metric, value in metrics.items():
-    #     print(f"{metric}: {value:.3f}")
 
 if __name__ == "__main__":
     main() 
