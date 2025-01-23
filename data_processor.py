@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import pickle
+import os
 from sklearn.preprocessing import MinMaxScaler
 from config import BookRecommenderConfig as cfg
 
@@ -17,8 +19,48 @@ class DataProcessor:
         self.unique_genres = None
         self.genre_to_idx = None
         
+    def save_checkpoint(self):
+        """Save the processed data and attributes to a checkpoint file."""
+        checkpoint = {
+            'scaler': self.scaler,
+            'books_cleaned': self.books_cleaned,
+            'book_titles': self.book_titles,
+            'book_authors': self.book_authors,
+            'title_author_pairs': self.title_author_pairs,
+            'title_author_lookup': self.title_author_lookup,
+            'unique_genres': self.unique_genres,
+            'genre_to_idx': self.genre_to_idx
+        }
+        
+        os.makedirs('checkpoints', exist_ok=True)
+        with open('checkpoints/data_processor.pkl', 'wb') as f:
+            pickle.dump(checkpoint, f)
+            
+    def load_checkpoint(self):
+        """Load processed data and attributes from checkpoint file if it exists."""
+        try:
+            with open('checkpoints/data_processor.pkl', 'rb') as f:
+                checkpoint = pickle.load(f)
+                
+            self.scaler = checkpoint['scaler']
+            self.books_cleaned = checkpoint['books_cleaned']
+            self.book_titles = checkpoint['book_titles']
+            self.book_authors = checkpoint['book_authors']
+            self.title_author_pairs = checkpoint['title_author_pairs']
+            self.title_author_lookup = checkpoint['title_author_lookup']
+            self.unique_genres = checkpoint['unique_genres']
+            self.genre_to_idx = checkpoint['genre_to_idx']
+            return True
+        except (FileNotFoundError, EOFError, KeyError):
+            return False
+        
     def load_and_clean_data(self):
         """Load and preprocess the books dataset, including data cleaning and feature engineering."""
+        if self.load_checkpoint():
+            print("Loaded preprocessed data from checkpoint")
+            return self.books_cleaned
+            
+        print("Processing data from scratch...")
         books_dataset = pd.read_csv(cfg.DATASET_PATH)
         
         books_dataset['genres'].fillna('[]', inplace=True)
@@ -31,7 +73,9 @@ class DataProcessor:
         selected_columns = ['title', 'author', 'genres', 'rating', 'numRatings', 'pages', 'language']
         self.books_cleaned = books_dataset[selected_columns]
         
-        # Calculate weighted rating using IMDB formula
+        # Using IMDB weighted rating formula: (v/(v+m))R + (m/(v+m))C
+        # where v = number of ratings, m = minimum ratings threshold,
+        # R = average rating of the book, C = mean rating across all books
         C = self.books_cleaned['numRatings'].mean()
         m = self.books_cleaned['numRatings'].quantile(0.75)
         self.books_cleaned['weighted_rating'] = (
@@ -55,6 +99,9 @@ class DataProcessor:
         
         numeric_features = self.books_cleaned[['rating', 'weighted_rating', 'pages']].values
         self.scaler.fit(numeric_features)
+        
+        self.save_checkpoint()
+        print("Saved processed data to checkpoint")
         
         return self.books_cleaned
     
