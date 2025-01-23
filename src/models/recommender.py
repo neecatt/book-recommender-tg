@@ -19,6 +19,10 @@ class BookRecommender:
         self.feature_matrix = None
         self.n_features = None
         
+        # Set up checkpoint directory
+        self.checkpoint_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'checkpoints')
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        
     def save_checkpoint(self):
         """Save the trained model, feature matrices and book splits to checkpoint file."""
         checkpoint = {
@@ -28,17 +32,19 @@ class BookRecommender:
             'n_features': self.n_features
         }
         
-        os.makedirs('checkpoints', exist_ok=True)
-        with open('checkpoints/recommender_data.pkl', 'wb') as f:
+        checkpoint_path = os.path.join(self.checkpoint_dir, 'recommender_data.pkl')
+        with open(checkpoint_path, 'wb') as f:
             pickle.dump(checkpoint, f)
             
         if self.model is not None:
-            self.model.save('checkpoints/annoy_index.ann')
+            annoy_path = os.path.join(self.checkpoint_dir, 'annoy_index.ann')
+            self.model.save(annoy_path)
             
     def load_checkpoint(self):
         """Load trained model and feature matrices from checkpoint file if it exists."""
         try:
-            with open('checkpoints/recommender_data.pkl', 'rb') as f:
+            checkpoint_path = os.path.join(self.checkpoint_dir, 'recommender_data.pkl')
+            with open(checkpoint_path, 'rb') as f:
                 checkpoint = pickle.load(f)
                 
             self.train_books = checkpoint['train_books']
@@ -46,9 +52,10 @@ class BookRecommender:
             self.feature_matrix = checkpoint['feature_matrix']
             self.n_features = checkpoint['n_features']
             
-            if os.path.exists('checkpoints/annoy_index.ann'):
+            annoy_path = os.path.join(self.checkpoint_dir, 'annoy_index.ann')
+            if os.path.exists(annoy_path):
                 self.model = AnnoyIndex(self.n_features, 'angular')
-                self.model.load('checkpoints/annoy_index.ann')
+                self.model.load(annoy_path)
                 print("Loaded trained model and features from checkpoint")
                 return True
             return False

@@ -19,6 +19,10 @@ class DataProcessor:
         self.unique_genres = None
         self.genre_to_idx = None
         
+        # Set up checkpoint directory
+        self.checkpoint_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'checkpoints')
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        
     def save_checkpoint(self):
         """Save the processed data and attributes to a checkpoint file."""
         checkpoint = {
@@ -32,14 +36,15 @@ class DataProcessor:
             'genre_to_idx': self.genre_to_idx
         }
         
-        os.makedirs('checkpoints', exist_ok=True)
-        with open('checkpoints/data_processor.pkl', 'wb') as f:
+        checkpoint_path = os.path.join(self.checkpoint_dir, 'data_processor.pkl')
+        with open(checkpoint_path, 'wb') as f:
             pickle.dump(checkpoint, f)
             
     def load_checkpoint(self):
         """Load processed data and attributes from checkpoint file if it exists."""
         try:
-            with open('checkpoints/data_processor.pkl', 'rb') as f:
+            checkpoint_path = os.path.join(self.checkpoint_dir, 'data_processor.pkl')
+            with open(checkpoint_path, 'rb') as f:
                 checkpoint = pickle.load(f)
                 
             self.scaler = checkpoint['scaler']
